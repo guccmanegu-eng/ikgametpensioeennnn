@@ -12,7 +12,12 @@ import {
   entersState,
   VoiceConnectionStatus,
   getVoiceConnection,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  NoSubscriberBehavior,
 } from "@discordjs/voice";
+import { getVoiceBuffer } from "google-tts-api";
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -68,8 +73,33 @@ const undeafenCommand = new SlashCommandBuilder()
   .setName("undeafen")
   .setDescription("Remove the bot's self-deafen.");
 
+const speakCommand = new SlashCommandBuilder()
+  .setName("speak")
+  .setDescription("Say text out loud in the voice channel via TTS.")
+  .addStringOption((opt) =>
+    opt
+      .setName("message")
+      .setDescription("The text to speak.")
+      .setRequired(true),
+  )
+  .addStringOption((opt) =>
+    opt
+      .setName("lang")
+      .setDescription("Speech language code (default: en)"),
+  )
+  .addIntegerOption((opt) =>
+    opt
+      .setName("speed")
+      .setDescription("Speech speed (0.24 – 4.0, default 1.0)"),
+  );
+
 // current client-side voice state of the bot
 const voiceState = { selfMute: true, selfDeaf: true };
+
+// one audio player shared by the whole bot
+const player = createAudioPlayer();
+player.on(AudioPlayerStatus.Idle, () => {});
+player.on("error", (err) => console.error("Audio player error:", err));
 
 function applyVoiceState() {
   const connection = getVoiceConnection(GUILD_ID);
@@ -93,6 +123,7 @@ async function registerCommands() {
       unmuteCommand,
       deafenCommand,
       undeafenCommand,
+      speakCommand,
     ].map((c) => c.toJSON()),
   });
   console.log("Slash commands registered.");
@@ -113,6 +144,7 @@ client.on("interactionCreate", async (interaction) => {
         await interaction.editReply("I'm not in a voice channel.");
         return;
       }
+      player.stop();
       connection.destroy();
       await interaction.editReply("Left the voice channel.");
       return;
@@ -132,6 +164,62 @@ client.on("interactionCreate", async (interaction) => {
             }**.`
           : "I'm not in a voice channel — run `/join` first. (Setting saved for next join.)",
       );
+      return;
+    }
+
+    if (name === "speak") {
+      const connection = getVoiceConnection(GUILD_ID);
+      if (!connection) {
+        await interaction.editReply(
+          "I'm not in a voice channel — run `/join` first.",
+        );
+        return;
+      }
+
+      const text = interaction.options.getString("message", true);
+      const lang = interaction.options.getString("lang") ?? "en";
+      const speed =
+        interaction.options.getInteger("speed") ?? 1.0; // matches google-tts-api range
+
+      try {
+        const buffer = await getVoiceBuffer(text, {
+          lang,
+          speed,
+        });
+
+        // TTS should be audible, so unmute briefly while speaking
+        const hadMute = voiceState.selfMute;
+        if (hadMute) {
+          voiceState.selfMute = false;
+          applyVoiceState();
+        }
+
+        const resource = createAudioResource(buffer, {
+          inputType: "unknown", // raw MP3 bytes from google-tts-api
+        });
+
+        connection.subscribe(player);
+        player.play(resource);
+
+        // restore mute state after playback finishes
+        player.once(AudioPlayerStatus.Idle, () => {
+          if (hadMute) {
+            voiceState.selfMute = true;
+            applyVoiceState();
+          }
+        });
+
+        await interaction.editReply(
+          `Speaking **${text.length > 100 ? text.slice(0, 100) + "…" : text}** (${
+            lang
+          }, speed ${speed}).`,
+        );
+      } catch (err) {
+        console.error(err);
+        await interaction.editReply(
+          "TTS failed. The text may be too long, or google-tts-api is temporarily unavailable.",
+        );
+      }
       return;
     }
 
