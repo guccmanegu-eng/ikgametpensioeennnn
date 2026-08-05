@@ -12,6 +12,6 @@
     "discord.js": "^14.16.3",
     "express": "^4.21.2",
     "libsodium-wrappers": "^0.7.15",
-    "google-tts-api": "^0.6.1"
+    "google-tts-api": "^2.0.2"
   }
 }
