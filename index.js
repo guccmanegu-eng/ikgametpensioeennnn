@@ -17,6 +17,7 @@ import {
   AudioPlayerStatus,
 } from "@discordjs/voice";
 import { getAllAudioBase64 } from "google-tts-api";
+import { Readable } from "stream";
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -212,11 +213,12 @@ client.on("interactionCreate", async (interaction) => {
 
         connection.subscribe(player);
 
-        // add this batch to the queue
+        // wrap each MP3 buffer in a Readable so @discordjs/voice can transcode it
+        // inputType "arbitrary" routes MP3 -> Opus through ffmpeg
         for (const c of chunks) {
           speakQueue.push(
-            createAudioResource(Buffer.from(c.base64, "base64"), {
-              inputType: "unknown",
+            createAudioResource(Readable.from(Buffer.from(c.base64, "base64")), {
+              inputType: "arbitrary",
             }),
           );
         }
