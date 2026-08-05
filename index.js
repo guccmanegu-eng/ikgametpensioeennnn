@@ -18,6 +18,27 @@ import {
 } from "@discordjs/voice";
 import { getAllAudioBase64 } from "google-tts-api";
 import { Readable } from "stream";
+import { createRequire } from "module";
+import { existsSync } from "fs";
+
+const require = createRequire(import.meta.url);
+
+// Detect ffmpeg availability at startup (needed to transcode MP3 -> Opus).
+// If ffmpeg-static is installed, @discordjs/voice uses it automatically.
+let ffmpegPath = null;
+let ffmpegError = null;
+try {
+  ffmpegPath = require("ffmpeg-static");
+  if (ffmpegPath && existsSync(ffmpegPath)) {
+    console.log(`[ffmpeg] using static binary: ${ffmpegPath}`);
+  } else {
+    ffmpegError = "ffmpeg-static installed but binary not found on disk";
+  }
+} catch (e) {
+  ffmpegError =
+    "ffmpeg-static is NOT installed. Add it to package.json dependencies: \"ffmpeg-static\": \"^5.2.0\"";
+}
+if (ffmpegError) console.error("[ffmpeg] WARNING: " + ffmpegError);
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -93,7 +114,9 @@ const voiceState = { selfMute: true, selfDeaf: true };
 
 // one audio player shared by the whole bot
 const player = createAudioPlayer();
-player.on("error", (err) => console.error("Audio player error:", err));
+player.on("error", (err) =>
+  console.error("[audio] player error:", err?.message ?? err),
+);
 
 // FIFO queue so multi-chunk TTS plays in order
 const speakQueue = [];
@@ -199,6 +222,12 @@ client.on("interactionCreate", async (interaction) => {
       const lang = interaction.options.getString("lang") ?? "en";
       const slow = interaction.options.getBoolean("slow") ?? false;
 
+      // fail fast with a clear reason if ffmpeg is missing (no silent failure)
+      if (ffmpegError) {
+        await interaction.editReply(`⚠️ Can't speak because ${ffmpegError}`);
+        return;
+      }
+
       try {
         // getAllAudioBase64 handles short AND long text (splits >200 chars)
         const chunks = await getAllAudioBase64(text, { lang, slow });
@@ -213,13 +242,15 @@ client.on("interactionCreate", async (interaction) => {
 
         connection.subscribe(player);
 
-        // wrap each MP3 buffer in a Readable so @discordjs/voice can transcode it
-        // inputType "arbitrary" routes MP3 -> Opus through ffmpeg
+        // add this batch to the queue
+        // - wrap each MP3 buffer in a Readable so @discordjs/voice can transcode it
+        // - inputType "arbitrary" routes MP3 -> Opus through ffmpeg
         for (const c of chunks) {
           speakQueue.push(
-            createAudioResource(Readable.from(Buffer.from(c.base64, "base64")), {
-              inputType: "arbitrary",
-            }),
+            createAudioResource(
+              Readable.from([Buffer.from(c.base64, "base64")]),
+              { inputType: "arbitrary" },
+            ),
           );
         }
         if (player.state.status !== AudioPlayerStatus.Playing) {
