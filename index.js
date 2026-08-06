@@ -17,7 +17,7 @@ import {
   AudioPlayerStatus,
 } from "@discordjs/voice";
 import { getAllAudioBase64 } from "google-tts-api";
-import ytdl from "ytdl-core";
+import ytdl from "@distube/ytdl-core";
 import { Readable } from "stream";
 import { createRequire } from "module";
 import { existsSync } from "fs";
