@@ -340,12 +340,21 @@ client.on("interactionCreate", async (interaction) => {
         // yt-dlp fetches metadata and hands us a direct audio URL;
         // we then stream that URL through ffmpeg -> Opus.
         const info = await youtubedl(url, {
-          dumpSingleJson: true,
-          format: "bestaudio/best",
-            noCheckCertificates: true,
-  extractorArgs: "youtube:player_client=web",
-          ...(existsSync(YT_COOKIES_TXT) ? { cookies: YT_COOKIES_TXT } : {}),
-        });
+  dumpSingleJson: true,
+  format: "bestaudio/best",
+  noCheckCertificates: true,
+  cookies: YT_COOKIES_TXT,
+  extractorArgs: {
+    youtube: {
+      playerClient: ["web"],
+      playerSkip: ["configs"]
+    }
+  },
+  jsRuntimes: {
+    node: {}
+  },
+  remoteComponents: ["ejs:github"]
+});
 
         const title =
           info?.title ??
