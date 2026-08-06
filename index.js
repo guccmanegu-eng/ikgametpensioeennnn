@@ -20,7 +20,7 @@ import { getAllAudioBase64 } from "google-tts-api";
 import ytdl from "@distube/ytdl-core";
 import { Readable } from "stream";
 import { createRequire } from "module";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 
 const require = createRequire(import.meta.url);
 
@@ -40,6 +40,33 @@ try {
     "ffmpeg-static is NOT installed. Add it to package.json dependencies: \"ffmpeg-static\": \"^5.2.0\"";
 }
 if (ffmpegError) console.error("[ffmpeg] WARNING: " + ffmpegError);
+
+// Load a YouTube session (cookies) so the bot can pass YouTube's
+// "Sign in to confirm you're not a bot" check when running from a
+// datacenter IP (Render). Provide either a YT_COOKIES env var (JSON array)
+// or a cookies.json file in the project root.
+function loadYouTubeAgent() {
+  let cookies = null;
+  try {
+    if (process.env.YT_COOKIES) {
+      cookies = JSON.parse(process.env.YT_COOKIES);
+    } else if (existsSync("./cookies.json")) {
+      cookies = JSON.parse(readFileSync("./cookies.json", "utf8"));
+    }
+  } catch (e) {
+    console.error("[yt] Failed to parse cookies:", e.message);
+  }
+  if (!cookies) {
+    console.warn(
+      "[yt] No YouTube cookies set (YT_COOKIES or cookies.json). YouTube bot-check will likely block /play.",
+    );
+    return null;
+  }
+  console.log(`[yt] Loaded ${cookies.length} YouTube cookies for bot-check bypass.`);
+  return ytdl.createAgent(cookies);
+}
+
+const ytAgent = loadYouTubeAgent();
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -303,7 +330,14 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       try {
-        const info = await ytdl.getInfo(url);
+        if (!ytAgent) {
+          await interaction.editReply(
+            "⚠️ YouTube blocked the bot-check. Set a YT_COOKIES env var (or cookies.json) with your YouTube session cookies, then redeploy.",
+          );
+          return;
+        }
+
+        const info = await ytdl.getInfo(url, { agent: ytAgent });
         const title = info.videoDetails.title;
 
         // unmute while audio is playing so everyone can hear it
@@ -321,6 +355,7 @@ client.on("interactionCreate", async (interaction) => {
         const stream = ytdl(url, {
           filter: "audioonly",
           quality: "highestaudio",
+          agent: ytAgent,
         });
         speakQueue.push(
           createAudioResource(stream, { inputType: "arbitrary" }),
