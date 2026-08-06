@@ -17,14 +17,14 @@ import {
   AudioPlayerStatus,
 } from "@discordjs/voice";
 import { getAllAudioBase64 } from "google-tts-api";
-import ytdl from "@distube/ytdl-core";
+import youtubedl from "youtube-dl-exec";
 import { Readable } from "stream";
 import { createRequire } from "module";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 
 const require = createRequire(import.meta.url);
 
-// Detect ffmpeg availability at startup (needed to transcode MP3 -> Opus).
+// Detect ffmpeg availability at startup (needed to transcode -> Opus).
 // If ffmpeg-static is installed, @discordjs/voice uses it automatically.
 let ffmpegPath = null;
 let ffmpegError = null;
@@ -41,32 +41,47 @@ try {
 }
 if (ffmpegError) console.error("[ffmpeg] WARNING: " + ffmpegError);
 
-// Load a YouTube session (cookies) so the bot can pass YouTube's
-// "Sign in to confirm you're not a bot" check when running from a
-// datacenter IP (Render). Provide either a YT_COOKIES env var (JSON array)
-// or a cookies.json file in the project root.
-function loadYouTubeAgent() {
-  let cookies = null;
+/* ------------------------------------------------------------------ */
+/* YouTube: build a cookies.txt (Netscape format) from the user's JSON  */
+/* so yt-dlp can pass YouTube's bot-check. Provide YT_COOKIES (JSON     */
+/* array) or a cookies.json file in the project root.                   */
+/* ------------------------------------------------------------------ */
+const YT_COOKIES_TXT = "./cookies.txt";
+
+function loadNetscapeCookies() {
+  let json = null;
   try {
     if (process.env.YT_COOKIES) {
-      cookies = JSON.parse(process.env.YT_COOKIES);
+      json = JSON.parse(process.env.YT_COOKIES);
     } else if (existsSync("./cookies.json")) {
-      cookies = JSON.parse(readFileSync("./cookies.json", "utf8"));
+      json = JSON.parse(readFileSync("./cookies.json", "utf8"));
     }
   } catch (e) {
     console.error("[yt] Failed to parse cookies:", e.message);
   }
-  if (!cookies) {
+  if (!Array.isArray(json) || json.length === 0) {
     console.warn(
-      "[yt] No YouTube cookies set (YT_COOKIES or cookies.json). YouTube bot-check will likely block /play.",
+      "[yt] No cookies set (YT_COOKIES or cookies.json). Bot-check may block /play.",
     );
-    return null;
+    return false;
   }
-  console.log(`[yt] Loaded ${cookies.length} YouTube cookies for bot-check bypass.`);
-  return ytdl.createAgent(cookies);
+  const lines = ["# Netscape HTTP Cookie File"];
+  for (const c of json) {
+    const domain = c.domain?.startsWith(".") ? c.domain : "." + (c.domain || "");
+    const secure = c.secure ? "TRUE" : "FALSE";
+    const exp = c.expirationDate
+      ? Math.floor(c.expirationDate)
+      : c.expiry ?? 0;
+    lines.push(
+      `${domain}\tTRUE\t${c.path ?? "/"}\t${secure}\t${exp}\t${c.name}\t${c.value}`,
+    );
+  }
+  writeFileSync(YT_COOKIES_TXT, lines.join("\n"), "utf8");
+  console.log(`[yt] Wrote ${json.length} cookies to ${YT_COOKIES_TXT}`);
+  return true;
 }
 
-const ytAgent = loadYouTubeAgent();
+const haveCookies = loadNetscapeCookies();
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -141,10 +156,7 @@ const playCommand = new SlashCommandBuilder()
   .setName("play")
   .setDescription("Play audio from a YouTube video in the voice channel.")
   .addStringOption((opt) =>
-    opt
-      .setName("url")
-      .setDescription("YouTube video URL")
-      .setRequired(true),
+    opt.setName("url").setDescription("YouTube video URL").setRequired(true),
   );
 
 const stopCommand = new SlashCommandBuilder()
@@ -273,10 +285,8 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       try {
-        // getAllAudioBase64 handles short AND long text (splits >200 chars)
         const chunks = await getAllAudioBase64(text, { lang, slow });
 
-        // unmute briefly while speaking, so everyone hears the TTS
         speaking = true;
         if (voiceState.selfMute) {
           muteQueueRestore = true;
@@ -286,9 +296,6 @@ client.on("interactionCreate", async (interaction) => {
 
         connection.subscribe(player);
 
-        // add this batch to the queue
-        // - wrap each MP3 buffer in a Readable so @discordjs/voice can transcode it
-        // - inputType "arbitrary" routes MP3 -> Opus through ffmpeg
         for (const c of chunks) {
           speakQueue.push(
             createAudioResource(
@@ -330,17 +337,35 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       try {
-        if (!ytAgent) {
+        // yt-dlp fetches metadata and hands us a direct audio URL;
+        // we then stream that URL through ffmpeg -> Opus.
+        const info = await youtubedl(url, {
+          dumpSingleJson: true,
+          format: "bestaudio",
+          ...(existsSync(YT_COOKIES_TXT) ? { cookies: YT_COOKIES_TXT } : {}),
+        });
+
+        const title =
+          info?.title ??
+          info?.fulltitle ??
+          info?.uploader ??
+          "YouTube audio";
+
+        const audio =
+          info?.requested_formats?.[0] ||
+          (info?.formats || []).find(
+            (f) => (f.vcodec === "none" || !f.vcodec) && f.acodec !== "none",
+          ) ||
+          info;
+        const audioUrl = audio?.url || info?.url;
+
+        if (!audioUrl) {
           await interaction.editReply(
-            "⚠️ YouTube blocked the bot-check. Set a YT_COOKIES env var (or cookies.json) with your YouTube session cookies, then redeploy.",
+            "⚠️ Couldn't find a playable audio stream for that video.",
           );
           return;
         }
 
-        const info = await ytdl.getInfo(url, { agent: ytAgent });
-        const title = info.videoDetails.title;
-
-        // unmute while audio is playing so everyone can hear it
         speaking = true;
         if (voiceState.selfMute) {
           muteQueueRestore = true;
@@ -349,17 +374,9 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         connection.subscribe(player);
-
-        // stream the audio directly; inputType "arbitrary" routes it through
-        // ffmpeg -> Opus
-        const stream = ytdl(url, {
-          filter: "audioonly",
-          quality: "highestaudio",
-          agent: ytAgent,
-        });
-        speakQueue.push(
-          createAudioResource(stream, { inputType: "arbitrary" }),
-        );
+        // pass the direct media URL to @discordjs/voice; arbitrary routes
+        // it through ffmpeg -> Opus
+        speakQueue.push(createAudioResource(audioUrl, { inputType: "arbitrary" }));
         if (player.state.status !== AudioPlayerStatus.Playing) {
           pumpQueue();
         }
@@ -368,7 +385,7 @@ client.on("interactionCreate", async (interaction) => {
       } catch (err) {
         console.error(err);
         await interaction.editReply(
-          "Couldn't load that video. YouTube may be blocking the request (ytdl-core is fragile).",
+          "⚠️ Couldn't play that video. YouTube may be blocking this server IP (bot-check). Make sure YT_COOKIES is set.",
         );
       }
       return;
