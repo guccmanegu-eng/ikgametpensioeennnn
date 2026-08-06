@@ -17,6 +17,7 @@ import {
   AudioPlayerStatus,
 } from "@discordjs/voice";
 import { getAllAudioBase64 } from "google-tts-api";
+import ytdl from "ytdl-core";
 import { Readable } from "stream";
 import { createRequire } from "module";
 import { existsSync } from "fs";
@@ -109,6 +110,20 @@ const speakCommand = new SlashCommandBuilder()
       .setDescription("Speak at the slowest speed (default: false)"),
   );
 
+const playCommand = new SlashCommandBuilder()
+  .setName("play")
+  .setDescription("Play audio from a YouTube video in the voice channel.")
+  .addStringOption((opt) =>
+    opt
+      .setName("url")
+      .setDescription("YouTube video URL")
+      .setRequired(true),
+  );
+
+const stopCommand = new SlashCommandBuilder()
+  .setName("stop")
+  .setDescription("Stop playback and clear the queue.");
+
 // current client-side voice state of the bot
 const voiceState = { selfMute: true, selfDeaf: true };
 
@@ -165,6 +180,8 @@ async function registerCommands() {
       deafenCommand,
       undeafenCommand,
       speakCommand,
+      playCommand,
+      stopCommand,
     ].map((c) => c.toJSON()),
   });
   console.log("Slash commands registered.");
@@ -268,6 +285,66 @@ client.on("interactionCreate", async (interaction) => {
           "TTS failed. Google may be rate-limiting you, or the lang code is wrong.",
         );
       }
+      return;
+    }
+
+    if (name === "play") {
+      const connection = getVoiceConnection(GUILD_ID);
+      if (!connection) {
+        await interaction.editReply("I'm not in a voice channel — run `/join` first.");
+        return;
+      }
+
+      const url = interaction.options.getString("url", true);
+
+      if (ffmpegError) {
+        await interaction.editReply(`⚠️ Can't play because ${ffmpegError}`);
+        return;
+      }
+
+      try {
+        const info = await ytdl.getInfo(url);
+        const title = info.videoDetails.title;
+
+        // unmute while audio is playing so everyone can hear it
+        speaking = true;
+        if (voiceState.selfMute) {
+          muteQueueRestore = true;
+          voiceState.selfMute = false;
+          applyVoiceState();
+        }
+
+        connection.subscribe(player);
+
+        // stream the audio directly; inputType "arbitrary" routes it through
+        // ffmpeg -> Opus
+        const stream = ytdl(url, {
+          filter: "audioonly",
+          quality: "highestaudio",
+        });
+        speakQueue.push(
+          createAudioResource(stream, { inputType: "arbitrary" }),
+        );
+        if (player.state.status !== AudioPlayerStatus.Playing) {
+          pumpQueue();
+        }
+
+        await interaction.editReply(`🎉 Now playing: **${title}**`);
+      } catch (err) {
+        console.error(err);
+        await interaction.editReply(
+          "Couldn't load that video. YouTube may be blocking the request (ytdl-core is fragile).",
+        );
+      }
+      return;
+    }
+
+    if (name === "stop") {
+      player.stop();
+      speakQueue.length = 0;
+      speaking = false;
+      muteQueueRestore = false;
+      await interaction.editReply("Stopped playback and cleared the queue.");
       return;
     }
 
