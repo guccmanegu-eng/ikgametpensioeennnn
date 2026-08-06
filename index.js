@@ -342,6 +342,8 @@ client.on("interactionCreate", async (interaction) => {
         const info = await youtubedl(url, {
           dumpSingleJson: true,
           format: "bestaudio",
+            noCheckCertificates: true,
+  extractorArgs: "youtube:player_client=android",
           ...(existsSync(YT_COOKIES_TXT) ? { cookies: YT_COOKIES_TXT } : {}),
         });
 
@@ -352,11 +354,11 @@ client.on("interactionCreate", async (interaction) => {
           "YouTube audio";
 
         const audio =
-          info?.requested_formats?.[0] ||
-          (info?.formats || []).find(
-            (f) => (f.vcodec === "none" || !f.vcodec) && f.acodec !== "none",
-          ) ||
-          info;
+  info?.requested_formats?.find((f) => f.acodec !== "none") ||
+  (info?.formats || []).find(
+    (f) => f.acodec !== "none" && f.vcodec === "none",
+  ) ||
+  info;
         const audioUrl = audio?.url || info?.url;
 
         if (!audioUrl) {
