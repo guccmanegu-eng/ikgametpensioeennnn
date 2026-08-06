@@ -341,9 +341,9 @@ client.on("interactionCreate", async (interaction) => {
         // we then stream that URL through ffmpeg -> Opus.
         const info = await youtubedl(url, {
           dumpSingleJson: true,
-          format: "bestaudio",
+          format: "bestaudio/best",
             noCheckCertificates: true,
-  extractorArgs: "youtube:player_client=android",
+  extractorArgs: "youtube:player_client=web",
           ...(existsSync(YT_COOKIES_TXT) ? { cookies: YT_COOKIES_TXT } : {}),
         });
 
